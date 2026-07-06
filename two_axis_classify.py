@@ -58,6 +58,31 @@ def polarity(sentence: str) -> int:
     return 0
 
 
+def negation_flip(doc_sent: str, ans_sent: str) -> bool:
+    """
+    두 문장이 '서술 부정'으로 뒤집혔나 (극성 사전이 놓치는 계사 부정).
+    예: '~이다' vs '~이 아니다', '~한다' vs '~하지 않는다'.
+    핵심어(명사)가 겹치는데 한쪽만 부정 표지가 있으면 반전으로 본다.
+    """
+    d = _norm(doc_sent)
+    a = _norm(ans_sent)
+    # 부정 표지 (서술어 부정)
+    neg_markers = ["아니다", "아니", "아닌", "않는다", "않다", "않은", "않았",
+                   "못한다", "못했", "없다", "없음", "말라", "마라"]
+    d_neg = any(m in d for m in neg_markers)
+    a_neg = any(m in a for m in neg_markers)
+    if d_neg == a_neg:
+        return False   # 둘 다 부정이거나 둘 다 긍정 → 반전 아님
+    # 한쪽만 부정. 내용 핵심어가 겹치는지 확인 (같은 주제여야 반전)
+    d_words = set(re.findall(r'[가-힣a-zA-Z0-9]{2,}', doc_sent))
+    a_words = set(re.findall(r'[가-힣a-zA-Z0-9]{2,}', ans_sent))
+    # 부정 표지 단어는 제외하고 겹침 계산
+    common = d_words & a_words
+    common = {w for w in common if not any(m in w for m in neg_markers)}
+    # 핵심어가 2개 이상 겹치면 같은 주제로 보고 반전 판정
+    return len(common) >= 2
+
+
 def extract_item(sentence: str) -> str:
     """문장에서 주어(항목) 대략 추출. '~은/는/이/가' 앞부분."""
     m = re.match(r"\s*([^,]+?)(은|는|이|가|의|에서|에는)\s", sentence)
@@ -126,12 +151,14 @@ class TwoAxisClassifier:
             if sim >= self.contra_sim:
                 p_ans = polarity(sentence)
                 p_doc = polarity(best_sent)
-                if p_ans != 0 and p_doc != 0 and p_ans != p_doc:
-                    pol_str = {1: "긍정", -1: "부정"}
+                sic_flip = (p_ans != 0 and p_doc != 0 and p_ans != p_doc)
+                # 극성 사전이 놓치는 서술 부정(~이다/~이 아니다)도 확인
+                neg_flip = negation_flip(best_sent, sentence)
+                if sic_flip or neg_flip:
                     return Judgment(
                         "CONTRADICTION",
-                        f"자료는 '{best_sent[:30]}...'({pol_str[p_doc]})인데 "
-                        f"답변은 반대({pol_str[p_ans]}) — 자료를 뒤집는 모순",
+                        f"자료 '{best_sent[:28]}...'를 답변이 부정으로 뒤집음 "
+                        f"— 자료를 뒤집는 모순",
                         sim, grounded, "darkred")
 
             # 유사도 충분히 높으면 일치
