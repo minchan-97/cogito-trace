@@ -43,6 +43,8 @@ def cos_sim(a, b):
 
 def get_embeddings(texts, key):
     from openai import OpenAI
+    # 키에 섞인 공백/개행/비ascii 문자 제거 (ascii 인코딩 에러 방지)
+    key = "".join(ch for ch in key.strip() if ord(ch) < 128)
     client = OpenAI(api_key=key)
     resp = client.embeddings.create(model="text-embedding-3-small", input=texts)
     return np.array([d.embedding for d in resp.data])
