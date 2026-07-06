@@ -27,15 +27,35 @@ import numpy as np
 
 @dataclass
 class Judgment:
-    label: str          # MATCH | VALUE_ERROR | HALLUCINATION
+    label: str          # MATCH | VALUE_ERROR | HALLUCINATION | CONTRADICTION
     reason: str         # 사람이 읽는 오류 이유
     similarity: float   # 가로축 값
     item_grounded: bool # 세로축: 항목이 자료에 있나
-    color: str          # green / orange / red
+    color: str          # green / orange / red / darkred
 
 
 def _norm(t: str) -> str:
     return re.sub(r"\s+", "", t)
+
+
+# 극성 사전 (긍정/부정) — 부정 반전 탐지용
+_NEG_WORDS = ["없다", "없음", "없으", "아니다", "아니", "않다", "않음", "않는",
+              "못하", "못한", "불가", "제외", "미흡", "부재", "불충분", "결여",
+              "부족하", "실패", "거부", "금지", "불허"]
+_POS_WORDS = ["있다", "있음", "있으", "존재", "포함", "가능", "충분", "달성",
+              "완료", "수행", "허용", "성공", "확보", "구비", "충족"]
+
+
+def polarity(sentence: str) -> int:
+    """문장의 극성. +1(긍정) / -1(부정) / 0(중립)."""
+    s = _norm(sentence)
+    neg = sum(1 for w in _NEG_WORDS if w in s)
+    pos = sum(1 for w in _POS_WORDS if w in s)
+    if neg > pos:
+        return -1
+    if pos > neg:
+        return +1
+    return 0
 
 
 def extract_item(sentence: str) -> str:
@@ -49,16 +69,27 @@ def extract_item(sentence: str) -> str:
 
 class TwoAxisClassifier:
     def __init__(self, corpus: str, embed_fn: Optional[Callable] = None,
-                 sim_threshold: float = 0.6):
+                 sim_threshold: float = 0.6, contradiction_sim: float = 0.55):
         """
         corpus: 자료 원문 (세로축 판정 기준)
         embed_fn: text -> vector (가로축). 없으면 유사도 축 비활성.
         sim_threshold: 이 이상이면 MATCH 후보.
+        contradiction_sim: 이 이상 유사한데 극성 반대면 모순으로 봄.
         """
         self.corpus = corpus
         self.corpus_compact = _norm(corpus)
         self.embed = embed_fn
         self.sim_th = sim_threshold
+        self.contra_sim = contradiction_sim
+        # 자료를 문장 단위로 쪼갬 (문장별 대조용)
+        self.corpus_sents = [s.strip() for s in re.split(r'(?<=[.!?。])\s+|\n+', corpus)
+                             if len(s.strip()) >= 5]
+        self._sent_vecs = None  # 지연 계산
+
+    def _corpus_sent_vecs(self):
+        if self._sent_vecs is None and self.embed is not None:
+            self._sent_vecs = [(s, self.embed(s)) for s in self.corpus_sents]
+        return self._sent_vecs or []
 
     def _item_in_corpus(self, item: str) -> bool:
         """항목(주어)이 자료에 실재하나 = 세로축."""
@@ -66,27 +97,49 @@ class TwoAxisClassifier:
         key = re.sub(r"(은|는|이|가|을|를|의|에|에서|에는)$", "", key)
         if len(key) < 2:
             return False
-        # 핵심 어절이 자료에 있나 (앞 6자)
         return key[:6] in self.corpus_compact
+
+    def _best_matching_sent(self, sent_vec):
+        """답변과 가장 유사한 자료 문장 + 그 유사도 반환."""
+        best_sim, best_sent = -1.0, ""
+        for s, sv in self._corpus_sent_vecs():
+            sim = float(np.dot(sent_vec, sv) /
+                        ((np.linalg.norm(sent_vec) * np.linalg.norm(sv)) + 1e-12))
+            if sim > best_sim:
+                best_sim, best_sent = sim, s
+        return best_sent, best_sim
 
     def classify(self, sentence: str, ref_text: str,
                  ref_vec=None, sent_vec=None) -> Judgment:
-        # ── 가로축: 유사도 ──
-        sim = None
-        if self.embed is not None:
-            rv = ref_vec if ref_vec is not None else self.embed(ref_text)
-            sv = sent_vec if sent_vec is not None else self.embed(sentence)
-            sim = float(np.dot(rv, sv) / ((np.linalg.norm(rv) * np.linalg.norm(sv)) + 1e-12))
-
-        # ── 세로축: 항목이 자료에 있나 ──
         item = extract_item(sentence)
         grounded = self._item_in_corpus(item)
 
-        # ── 결합 판정 ──
-        if sim is not None and sim >= self.sim_th:
-            return Judgment("MATCH", "자료와 일치", sim, grounded, "green")
+        # ── 유사도 축: 자료 전체 문장 중 최대 유사도 + 가장 닮은 문장 ──
+        sim = None
+        best_sent = ""
+        if self.embed is not None:
+            sv = sent_vec if sent_vec is not None else self.embed(sentence)
+            best_sent, sim = self._best_matching_sent(sv)
 
-        # 유사도 낮음(또는 미측정) → 세로축으로 이유 구분
+            # ── 부정 반전(모순) 탐지 ──
+            # 가장 닮은 자료 문장과 내용은 유사(높은 sim)한데 극성이 반대면 = 모순
+            if sim >= self.contra_sim:
+                p_ans = polarity(sentence)
+                p_doc = polarity(best_sent)
+                if p_ans != 0 and p_doc != 0 and p_ans != p_doc:
+                    pol_str = {1: "긍정", -1: "부정"}
+                    return Judgment(
+                        "CONTRADICTION",
+                        f"자료는 '{best_sent[:30]}...'({pol_str[p_doc]})인데 "
+                        f"답변은 반대({pol_str[p_ans]}) — 자료를 뒤집는 모순",
+                        sim, grounded, "darkred")
+
+            # 유사도 충분히 높으면 일치
+            if sim >= self.sim_th:
+                return Judgment("MATCH", f"자료 문장과 일치(유사 근거 있음)",
+                                sim, grounded, "green")
+
+        # ── 유사도 낮음(또는 미측정) → 세로축으로 이유 구분 ──
         if grounded:
             return Judgment(
                 "VALUE_ERROR",
