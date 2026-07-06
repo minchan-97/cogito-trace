@@ -134,6 +134,26 @@ class TwoAxisClassifier:
                 best_sim, best_sent = sim, s
         return best_sent, best_sim
 
+    def _subject_matches_predicate(self, sentence: str, doc_sent: str) -> Optional[bool]:
+        """
+        주어 교체 탐지.
+        답변과 자료 문장의 서술부는 같은데(유사도 높음) 주어가 다르면 → 값 오류.
+        반환: True(주어 일치) / False(주어 교체됨) / None(판정 불가)
+        """
+        ans_subj = _norm(extract_item(sentence))
+        doc_subj = _norm(extract_item(doc_sent))
+        ans_subj = re.sub(r"(은|는|이|가|을|를|의|에|에서|에는)$", "", ans_subj)
+        doc_subj = re.sub(r"(은|는|이|가|을|를|의|에|에서|에는)$", "", doc_subj)
+        if len(ans_subj) < 2 or len(doc_subj) < 2:
+            return None
+        # 답변 주어가 자료 어디에도 없으면(그 서술어의 주체가 아님) 교체로 봄
+        if ans_subj[:4] not in self.corpus_compact:
+            return False
+        # 답변 주어와 자료 문장 주어가 다르면 교체 가능성
+        if ans_subj[:4] != doc_subj[:4]:
+            return False
+        return True
+
     def classify(self, sentence: str, ref_text: str,
                  ref_vec=None, sent_vec=None) -> Judgment:
         item = extract_item(sentence)
@@ -147,12 +167,10 @@ class TwoAxisClassifier:
             best_sent, sim = self._best_matching_sent(sv)
 
             # ── 부정 반전(모순) 탐지 ──
-            # 가장 닮은 자료 문장과 내용은 유사(높은 sim)한데 극성이 반대면 = 모순
             if sim >= self.contra_sim:
                 p_ans = polarity(sentence)
                 p_doc = polarity(best_sent)
                 sic_flip = (p_ans != 0 and p_doc != 0 and p_ans != p_doc)
-                # 극성 사전이 놓치는 서술 부정(~이다/~이 아니다)도 확인
                 neg_flip = negation_flip(best_sent, sentence)
                 if sic_flip or neg_flip:
                     return Judgment(
@@ -161,9 +179,19 @@ class TwoAxisClassifier:
                         f"— 자료를 뒤집는 모순",
                         sim, grounded, "darkred")
 
-            # 유사도 충분히 높으면 일치
+            # ── 주어 교체 탐지 (claim 대조 통합) ──
+            # 유사도 높음(서술부 같음)인데 주어가 자료의 그 주체와 다르면 값 오류
             if sim >= self.sim_th:
-                return Judgment("MATCH", f"자료 문장과 일치(유사 근거 있음)",
+                subj_ok = self._subject_matches_predicate(sentence, best_sent)
+                if subj_ok is False:
+                    return Judgment(
+                        "VALUE_ERROR",
+                        f"서술 내용은 자료와 유사하나 주어가 다름 "
+                        f"— 자료의 주체는 '{extract_item(best_sent)}', "
+                        f"답변은 '{item}' (주어 교체 가능)",
+                        sim, grounded, "orange")
+                # 주어도 일치 → 진짜 일치
+                return Judgment("MATCH", "자료 문장과 일치(주어·서술 모두 일치)",
                                 sim, grounded, "green")
 
         # ── 유사도 낮음(또는 미측정) → 세로축으로 이유 구분 ──
