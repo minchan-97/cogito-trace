@@ -79,10 +79,12 @@ if st.button("3. 분류 + 이유 설명", type="primary"):
     st.subheader("4. 판정 결과")
     cmap = {"green": ("#e6f4ea", "#137333", "✅"),
             "orange": ("#fef7e0", "#e37400", "△"),
-            "red": ("#fce8e6", "#c5221f", "❌")}
-    label_ko = {"MATCH": "일치", "VALUE_ERROR": "값 오류", "HALLUCINATION": "환각"}
+            "red": ("#fce8e6", "#c5221f", "❌"),
+            "darkred": ("#fadbd8", "#7b1fa2", "🔴")}
+    label_ko = {"MATCH": "일치", "VALUE_ERROR": "값 오류",
+                "HALLUCINATION": "환각", "CONTRADICTION": "모순(자료 반대)"}
 
-    counts = {"MATCH": 0, "VALUE_ERROR": 0, "HALLUCINATION": 0}
+    counts = {"MATCH": 0, "VALUE_ERROR": 0, "HALLUCINATION": 0, "CONTRADICTION": 0}
     for s in sentences:
         rv = ref_vec if ref_vec is not None else None
         sv = sent_vecs.get(s) if sent_vecs else None
@@ -104,13 +106,14 @@ if st.button("3. 분류 + 이유 설명", type="primary"):
 
     # 요약
     st.markdown("---")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("✅ 일치", counts["MATCH"])
-    c2.metric("△ 값 오류", counts["VALUE_ERROR"])
-    c3.metric("❌ 환각", counts["HALLUCINATION"])
-    st.caption("값 오류 = 항목은 자료에 있으나 내용이 다름 → 확인 필요. "
-               "환각 = 근거 자체가 자료에 없음 → 지어냄. "
-               "이 구분이 곧 '왜 틀렸는가'의 설명이다.")
+    c2.metric("🔴 모순", counts["CONTRADICTION"])
+    c3.metric("△ 값 오류", counts["VALUE_ERROR"])
+    c4.metric("❌ 환각", counts["HALLUCINATION"])
+    st.caption("모순 = 자료를 정면으로 뒤집음(없다↔있다) → 가장 위험한 환각. "
+               "값 오류 = 항목은 맞으나 내용 다름 → 확인 필요. "
+               "환각 = 근거 자체가 자료에 없음. 이 구분이 곧 '왜 틀렸는가'의 설명이다.")
 
     if not api_key:
         st.info("💡 OpenAI Key를 넣으면 유사도 축이 더해져 '일치' 판정이 정밀해집니다. "
