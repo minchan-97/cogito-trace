@@ -63,16 +63,23 @@ if st.button("3. 분류 + 이유 설명", type="primary"):
     # 임베딩 (키 있으면)
     embed_fn = None
     ref_vec = None
-    sent_vecs = {}
+    vec_cache = {}
     if api_key:
         with st.spinner("임베딩 계산 중..."):
             try:
-                texts = [corpus] + sentences
-                embs = get_embeddings(texts, api_key)
-                ref_vec = embs[0]
-                for i, s in enumerate(sentences):
-                    sent_vecs[s] = embs[i + 1]
-                embed_fn = lambda t: sent_vecs.get(t, ref_vec)
+                import re as _re
+                # 자료를 문장 단위로 쪼갬 (classify 내부와 동일 기준)
+                corpus_sents = [s.strip() for s in _re.split(r'(?<=[.!?。])\s+|\n+', corpus)
+                                if len(s.strip()) >= 5]
+                # 답변 + 자료문장 + 자료전체를 모두 임베딩해 캐시
+                texts = sentences + corpus_sents + [corpus]
+                # 중복 제거(순서 유지)
+                uniq = list(dict.fromkeys(texts))
+                embs = get_embeddings(uniq, api_key)
+                for t, v in zip(uniq, embs):
+                    vec_cache[t] = v
+                ref_vec = vec_cache.get(corpus)
+                embed_fn = lambda t: vec_cache.get(t) if vec_cache.get(t) is not None else ref_vec
             except Exception as e:
                 st.error(f"임베딩 실패(근거 축만 사용): {e}")
 
@@ -88,9 +95,7 @@ if st.button("3. 분류 + 이유 설명", type="primary"):
 
     counts = {"MATCH": 0, "VALUE_ERROR": 0, "HALLUCINATION": 0, "CONTRADICTION": 0}
     for s in sentences:
-        rv = ref_vec if ref_vec is not None else None
-        sv = sent_vecs.get(s) if sent_vecs else None
-        j = clf.classify(s, corpus, ref_vec=rv, sent_vec=sv)
+        j = clf.classify(s, corpus)
         counts[j.label] = counts.get(j.label, 0) + 1
         bg, fg, icon = cmap[j.color]
         sim_str = f"유사도 {j.similarity:.3f}" if j.similarity >= 0 else "유사도 미측정"
